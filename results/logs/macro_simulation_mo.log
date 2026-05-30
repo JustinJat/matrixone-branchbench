@@ -1,0 +1,20 @@
+Run ID: macro_simulation_mo
+Backend: MATRIXONE
+Workflow: SIMULATION
+Workers: 15, Steps/worker: 1
+Tree: F_r=15, F_i=0, D=1
+Per-step: M_s=0, M_d=50, Q_v=1, gamma=1.00
+Cross-branch queries: C=1
+Runtime cap: 900s
+Default MatrixOne connection URI: mysql://<ACCOUNT>:admin:accountadmin@<MO_HOST>:6001/mysql
+Loaded MatrixOne database 'macro_sim_mo' from db_setup/ch_benchmark_seed_mo.sql
+Estimated bytes per step: 94,400
+
+Starting macrobenchmark with 15 worker(s)...
+
+Completed in 2.9s
+Branch tree: 16 total nodes, 1 alive
+  Total: 15/15 steps, 825 ops across 15 worker(s)
+E2E stats written to /tmp/macro_mo/macro_simulation_mo_e2e_stats.json
+Wrote 835 benchmark results to /tmp/macro_mo/macro_simulation_mo.parquet
+MatrixOne databases for 'macro_sim_mo' deleted successfully.

@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package macrobench;
+
+// All supported database backends (mirrors microbench)
+enum Backend {
+    NEON = 0;
+    DOLT = 1;
+    KPG = 2;
+    XATA = 3;
+    FILE_COPY = 4;
+    TIGER = 5;
+    TXN = 6;
+    MATRIXONE = 7;
+}
+
+// The five representative workflow categories from Section 3.1
+enum WorkflowType {
+    SOFTWARE_DEV = 0;
+    FAILURE_REPRO = 1;
+    DATA_CLEANING = 2;
+    MCTS = 3;
+    SIMULATION = 4;
+}
+
+// Configuration for reusing an existing database
+message ExistingDatabase {
+    string branch_id = 1;
+    string neon_project_id = 2;
+}
+
+// Configuration for creating database from SQL dump
+message SqlDump {
+    string sql_dump_path = 1;
+}
+
+// Database setup configuration
+message DatabaseSetup {
+    string db_name = 1;
+    bool cleanup = 2;
+
+    oneof source {
+        ExistingDatabase existing_db = 3;
+        SqlDump sql_dump = 4;
+    }
+}
+
+// Setup parameters (Section 3.3, Table 1 "Setup" group)
+message SetupParams {
+    int32 workers = 1;              // T: number of worker threads
+    int32 total_steps = 2;          // S: steps per worker (round-robin)
+    reserved 3;                     // was db_size
+    int32 root_fanout = 4;          // F_r: max children of root node
+    int32 max_depth = 5;            // D: max nesting level
+    int32 inner_fanout = 6;         // F_i: max children of inner nodes
+    int32 cross_branch_queries = 7; // C: cross-branch queries spread over S steps
+    int32 db_scale = 8;             // Scale factor = num warehouses (10: 10 WH, 1K items, 100 cust/district)
+}
+
+// Per-step parameters (Section 3.3, Table 1 "Per-step" group)
+message StepParams {
+    int32 data_mutations = 1;   // M_d: data-mutation statements per step
+    int32 schema_changes = 2;   // M_s: schema-change statements per step
+    int32 eval_queries = 3;     // Q_v: evaluation queries per step
+    float prune_prob = 4;       // gamma: probability of pruning after evaluation
+}
+
+// Top-level macrobenchmark configuration
+message MacroBenchConfig {
+    string run_id = 1;
+    Backend backend = 2;
+    WorkflowType workflow = 3;
+    DatabaseSetup database_setup = 4;
+    SetupParams setup = 5;
+    StepParams step = 6;
+    // field 7 removed (was BackgroundParams background)
+    bool autocommit = 8;
+
+    // Whether to measure storage (disk_size_before/after) around each timed operation.
+    bool measure_storage = 9;
+}

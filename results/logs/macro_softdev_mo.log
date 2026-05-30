@@ -1,0 +1,20 @@
+Run ID: macro_software_dev_mo
+Backend: MATRIXONE
+Workflow: SOFTWARE_DEV
+Workers: 2, Steps/worker: 5
+Tree: F_r=3, F_i=2, D=3
+Per-step: M_s=2, M_d=1, Q_v=2, gamma=0.10
+Cross-branch queries: C=1
+Runtime cap: 900s
+Default MatrixOne connection URI: mysql://<ACCOUNT>:admin:accountadmin@<MO_HOST>:6001/mysql
+Loaded MatrixOne database 'macro_softdev_mo' from db_setup/ch_benchmark_seed_mo.sql
+Estimated bytes per step: 600,400
+
+Starting macrobenchmark with 2 worker(s)...
+
+Completed in 4.9s
+Branch tree: 11 total nodes, 9 alive
+  Total: 10/10 steps, 74 ops across 2 worker(s)
+E2E stats written to /tmp/macro_mo/macro_software_dev_mo_e2e_stats.json
+Appended 84 results to /tmp/macro_mo/macro_software_dev_mo.parquet (total: 115 rows)
+MatrixOne databases for 'macro_softdev_mo' deleted successfully.

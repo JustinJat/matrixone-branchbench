@@ -1,0 +1,48 @@
+{
+  "run_id": "macro_mcts_full_mo",
+  "backend": "MATRIXONE",
+  "workflow": "MCTS",
+  "workers": 10,
+  "total_steps": 100,
+  "elapsed_sec": 47.89,
+  "max_runtime_sec": 7200,
+  "timed_out": false,
+  "completed_steps": {
+    "4": 100,
+    "3": 100,
+    "8": 100,
+    "0": 100,
+    "2": 100,
+    "5": 100,
+    "9": 100,
+    "1": 100,
+    "7": 100,
+    "6": 100
+  },
+  "completed_ops": {
+    "4": 412,
+    "3": 416,
+    "8": 420,
+    "0": 422,
+    "2": 438,
+    "5": 416,
+    "9": 430,
+    "1": 420,
+    "7": 428,
+    "6": 426
+  },
+  "worker_status": {
+    "4": "completed",
+    "3": "completed",
+    "8": "completed",
+    "0": "completed",
+    "2": "completed",
+    "5": "completed",
+    "9": "completed",
+    "1": "completed",
+    "7": "completed",
+    "6": "completed"
+  },
+  "estimated_bytes_per_step": 16,
+  "total_estimated_bytes_written": 16000
+}

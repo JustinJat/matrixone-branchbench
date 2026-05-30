@@ -1,0 +1,24 @@
+{
+  "run_id": "macro_software_dev_mo",
+  "backend": "MATRIXONE",
+  "workflow": "SOFTWARE_DEV",
+  "workers": 2,
+  "total_steps": 5,
+  "elapsed_sec": 6.29,
+  "max_runtime_sec": 900,
+  "timed_out": false,
+  "completed_steps": {
+    "0": 5,
+    "1": 5
+  },
+  "completed_ops": {
+    "0": 39,
+    "1": 35
+  },
+  "worker_status": {
+    "0": "completed",
+    "1": "completed"
+  },
+  "estimated_bytes_per_step": 600400,
+  "total_estimated_bytes_written": 6004000
+}

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "grpcio-tools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "db-fork"
+version = "0.1.0"
+description = "Database branching related mess."
+authors = [{ name = "Elaine", email = "ra3448@columbia.edu" }]
+requires-python = ">=3.11"
+dependencies = [
+    "anytree",
+    "coolname",
+    "faker",
+    "microbench",
+    "neon-api",
+    "numpy",
+    "protobuf",
+    "psycopg2-binary",
+    "psycopg[binary]>=3.0",  # For async database operations
+    "python-dotenv",
+    "langchain",
+    "langgraph",
+    "langchain-google-genai",
+    "langchain-openai",
+    "scipy",
+    "matplotlib",
+    "pyarrow",
+    "tqdm",
+    "setuptools",
+    "pandas",
+]
+
+[tool.setuptools]
+packages = ["dblib", "microbench", "util"]
+
+[tool.setuptools.package-data]
+lib = ["*.py"]
+dblib = ["*.proto", "*_pb2.py"]
+
+[tool.setuptools.cmdclass]
+build_py = "build_protos.BuildWithProtos"
