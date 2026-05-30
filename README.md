@@ -32,6 +32,7 @@ python scripts/macro_comparison.py --dolt-dir run_stats_final/macro/dolt_full --
 ## Table of Contents
 
 - [Running on MatrixOne](#running-on-matrixone)
+- [Results](#results)
 - [Macrobenchmarks](#macrobenchmarks)
 - [Microbenchmarks](#microbenchmarks)
   - [Latency Benchmarks](#latency-benchmarks)
@@ -115,6 +116,57 @@ runs 1000 workers. See [`REPORT.md`](REPORT.md) §5.2.
   [`results/`](results/).
 - **Cleanup.** The runner drops every branch database and snapshot it creates on
   exit — important when sharing a MatrixOne tenant.
+
+---
+
+## Results
+
+BranchBench surfaces a **branch-agility vs. branch-local-query** tradeoff. The
+paper evaluates Neon and Dolt; this fork adds MatrixOne measured with the same
+methodology. Full detail, plots, and caveats are in [`REPORT.md`](REPORT.md).
+
+### Capability — full scale
+
+✓ complete · ∼ partial/timeout · ✗ cannot execute.
+Neon/Dolt from the paper (full config, 2-hour timeout); MatrixOne measured here.
+
+| System | Software Dev | Failure Repro | Data Cleaning | MCTS | MC Simulation |
+|---|:--:|:--:|:--:|:--:|:--:|
+| Neon | ∼ | ✓ | ∼ | ∼ | ✗ |
+| Dolt | ✓ | ✓ | ✓ | ∼ | ✗ |
+| **MatrixOne** | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+**MatrixOne is the only one of the three to complete all five full-scale
+workflows** — no live-branch cap (it held **887 simultaneous live physical
+databases** in MCTS, where Neon hits its ~20-branch wall) and branch-local SQL
+stays fast (no Dolt-style prolly-tree read penalty).
+
+### MatrixOne full-scale run detail
+
+Per-workflow parameters are the paper's Table 1 (deliberately heterogeneous —
+only MC Simulation runs 1000 workers). T × S = total steps.
+
+| Workflow | T (workers) | S (steps/worker) | Total steps | Live branches (peak) | Total ops | Wall | Branch-create p50 / max |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| Software Dev | 5 | 20 | 100 | 84 | 734 | 28.6 s | 0.245 s / 1.44 s |
+| Failure Repro | 1 | 10 | 10 | 1 | 545 | 21.6 s | 0.455 s / 0.67 s |
+| Data Cleaning | 10 | 20 | 200 | 201 | 1000 | 18.8 s | 0.268 s / 1.26 s |
+| MCTS | 10 | 100 | 1000 | 887 | 4228 | 47.9 s | 0.234 s / 1.60 s |
+| MC Simulation | 1000 | 1 | 1000 | ~1000 transient | 55,128 | 90.0 s | 44.1 s / 81 s |
+
+### Takeaways
+
+- **No live-branch cap** — branch creation is O(1) in branch count; 887 / 201
+  live databases held concurrently where Neon caps out.
+- **Branch-create cost is concurrency-bound, not fixed** — ~0.23–0.46 s p50 at
+  ≤10 workers, rising to 44 s p50 at 1000 concurrent workers (degrades
+  gracefully rather than hitting a wall).
+- **Branch-local SQL stays fast** at all scales (reads/mutations in the tens of
+  ms), unlike Dolt's join/range-read stalls.
+
+**Net:** MatrixOne occupies a favorable corner of BranchBench's tradeoff —
+Dolt-style uncapped branching *and* Neon-style fast branch-local queries — at the
+cost of branch-create latency under heavy concurrency.
 
 ---
 
