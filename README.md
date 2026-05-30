@@ -31,12 +31,90 @@ python scripts/macro_comparison.py --dolt-dir run_stats_final/macro/dolt_full --
 
 ## Table of Contents
 
+- [Running on MatrixOne](#running-on-matrixone)
 - [Macrobenchmarks](#macrobenchmarks)
 - [Microbenchmarks](#microbenchmarks)
   - [Latency Benchmarks](#latency-benchmarks)
   - [Throughput Benchmarks](#throughput-benchmarks)
 - [Plotting Results](#plotting-results)
 - [Output Files](#output-files)
+
+---
+
+## Running on MatrixOne
+
+This fork adds **MatrixOne** (a MySQL-wire-protocol database) as a branchable
+backend. MatrixOne branching is implemented as snapshot + zero-copy database
+clone: each branch is a separate physical database
+(`CREATE SNAPSHOT … FOR DATABASE …` + `CREATE DATABASE … CLONE … {SNAPSHOT=…}`).
+The MatrixOne backend (`backend: MATRIXONE`) lives in
+[`dblib/matrixone.py`](dblib/matrixone.py) and speaks the MySQL protocol via
+`pymysql` — not the PostgreSQL path used by Dolt/Neon, so the MatrixOne
+workflows are launched through `macrobench.runner` directly rather than
+`run_macrobench.sh`. See [`REPORT.md`](REPORT.md) for the full methodology and
+results.
+
+### 1. Setup
+
+```bash
+python3 -m venv venv && source venv/bin/activate
+pip3 install .          # pulls in pymysql
+
+# Regenerate protos so the Backend enum includes MATRIXONE = 7
+python3 build_protos.py
+```
+
+### 2. Point at a MatrixOne instance
+
+Connection params are read from env vars (localhost defaults; **no credentials
+are committed**):
+
+```bash
+export MO_HOST=<host> MO_PORT=6001 MO_USER=<user> MO_PASSWORD=<pass>
+```
+
+### 3. Microbenchmark (paper Figures 5 & 6)
+
+Branch-lifecycle latency and branch-local read capacity vs. branch count:
+
+```bash
+python3 bench_paper_micro.py
+```
+
+### 4. Macrobenchmark — mini (smoke test, all 5 workflows)
+
+```bash
+for wf in software_dev failure_repro data_cleaning mcts simulation; do
+  python3 -m macrobench.runner --config macrobench/configs/${wf}_mo.textproto \
+    --no-progress --outdir results/run
+done
+```
+
+### 5. Macrobenchmark — full scale (paper Table 1)
+
+```bash
+for wf in software_dev failure_repro data_cleaning mcts simulation; do
+  python3 -m macrobench.runner --config macrobench/configs/${wf}_full_mo.textproto \
+    --no-progress --outdir results/run --max-runtime-sec 7200
+done
+```
+
+Per-workflow parameters (T workers, S steps/worker, fanout, depth, γ) are the
+paper's Table 1 and are **intentionally heterogeneous** — only MC Simulation
+runs 1000 workers. See [`REPORT.md`](REPORT.md) §5.2.
+
+### Notes
+
+- **FK-free seed.** MatrixOne cannot snapshot-clone a database that carries
+  foreign-key constraints, so the configs seed from
+  [`db_setup/ch_benchmark_seed_mo.sql`](db_setup/ch_benchmark_seed_mo.sql)
+  (FK block removed; workload semantics unchanged). See `REPORT.md` §6.1.
+- **Configs.** `macrobench/configs/*_mo.textproto` (mini) and `*_full_mo.textproto`
+  (full scale).
+- **Results.** Committed runs (parquet, e2e-stats JSON, scrubbed logs) are under
+  [`results/`](results/).
+- **Cleanup.** The runner drops every branch database and snapshot it creates on
+  exit — important when sharing a MatrixOne tenant.
 
 ---
 
