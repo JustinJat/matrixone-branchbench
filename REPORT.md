@@ -105,13 +105,20 @@ read penalty).
 
 ### 5.2 Full-scale run detail (MatrixOne)
 
-| Workflow | Workers | Steps | Live branches (peak) | Total ops | Wall | Branch-create p50 / max |
-|---|--:|--:|--:|--:|--:|--:|
-| Software Dev | 5 | 100 | 84 | 734 | 28.6 s | 0.245 s / 1.44 s |
-| Failure Repro | 1 | 10 | 1 | 545 | 21.6 s | 0.455 s / 0.67 s |
-| Data Cleaning | 10 | 200 | 201 | 1000 | 18.8 s | 0.268 s / 1.26 s |
-| MCTS | 10 | 1000 | 887 | 4228 | 47.9 s | 0.234 s / 1.60 s |
-| MC Simulation | 1000 | 1000 | ~1000 transient | 55,128 | 90.0 s | 44.1 s / 81 s |
+Per-workflow parameters are the paper's Table 1 (Section 3.3) — **deliberately
+heterogeneous**, not a uniform scale. T (workers) × S (steps/worker) = total
+steps; only MC Simulation runs 1000 workers (flat star, F_r=1000), and only
+MCTS/Simulation reach 1000 total steps. Forcing all five to 1000×1000 would not
+be "full scale" — it would erase the distinct agentic workload shapes the
+benchmark measures.
+
+| Workflow | T (workers) | S (steps/worker) | Total steps (T×S) | Live branches (peak) | Total ops | Wall | Branch-create p50 / max |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| Software Dev | 5 | 20 | 100 | 84 | 734 | 28.6 s | 0.245 s / 1.44 s |
+| Failure Repro | 1 | 10 | 10 | 1 | 545 | 21.6 s | 0.455 s / 0.67 s |
+| Data Cleaning | 10 | 20 | 200 | 201 | 1000 | 18.8 s | 0.268 s / 1.26 s |
+| MCTS | 10 | 100 | 1000 | 887 | 4228 | 47.9 s | 0.234 s / 1.60 s |
+| MC Simulation | 1000 | 1 | 1000 | ~1000 transient | 55,128 | 90.0 s | 44.1 s / 81 s |
 
 ### 5.3 Operation-latency breakdown (mini config, pooled across workflows)
 
