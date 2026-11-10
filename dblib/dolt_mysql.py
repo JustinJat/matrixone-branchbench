@@ -15,6 +15,14 @@ Setup (load_and_commit): the SQL file runs statement by statement in a new datab
 DOLT_COMMIT, as commit_dolt_schema does for DoltgreSQL, so every branch starts from the loaded data.
 Connection: DOLT_MYSQL_HOST / _PORT / _USER / _PASSWORD (defaults 127.0.0.1, 3306, root, empty);
 socket timeout DOLT_MYSQL_QUERY_TIMEOUT_SEC (default MO_QUERY_TIMEOUT_SEC, else 1800 s).
+
+DOLT_COMMIT_BEFORE_BRANCH=1 (11-10, the "same work" variant): with the configs' autocommit: true nothing is ever
+Dolt-committed, so a child branch starts from its parent's last commit (the seed) and misses everything the parent
+did; MatrixOne's CLONE and Neon's branches copy the parent's current state. With this flag, branch creation first
+commits the parent's working set (CALL DOLT_COMMIT('-Am', ...), timed as part of BRANCH_CREATE; "nothing to commit",
+e.g. on the untouched root, is fine), so the child starts from the parent's current state as on the other systems.
+Unset: exactly the paper's behaviour. drop_database also purges Dolt's dropped-database copies (.dolt_dropped_databases)
+so that the disk space comes back.
 """
 
 import os
@@ -30,6 +38,7 @@ DOLT_MYSQL_PASSWORD = os.environ.get("DOLT_MYSQL_PASSWORD", "")
 DOLT_MYSQL_HOST = os.environ.get("DOLT_MYSQL_HOST", "127.0.0.1")
 DOLT_MYSQL_PORT = int(os.environ.get("DOLT_MYSQL_PORT", "3306"))
 COMMIT_AUTHOR = "branchbench <branchbench@localhost>"
+DOLT_COMMIT_BEFORE_BRANCH = os.environ.get("DOLT_COMMIT_BEFORE_BRANCH", "0") == "1"
 
 
 def _connect(db_name: str = None, autocommit: bool = False, timeout: float = None):
@@ -85,6 +94,10 @@ def drop_database(db_name: str) -> None:
     try:
         with server.cursor() as cur:
             cur.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
+            try:
+                cur.execute("CALL DOLT_PURGE_DROPPED_DATABASES()")
+            except Exception as e:
+                print(f"Warning: could not purge dropped Dolt databases: {e}")
     finally:
         server.close()
 
@@ -156,6 +169,15 @@ class DoltMySQLToolSuite(DBToolSuite):
     def _create_branch_impl(self, branch_name: str, parent_id: str = None) -> None:
         if parent_id:
             self._connect_branch_impl(parent_id)
+        if DOLT_COMMIT_BEFORE_BRANCH:
+            try:
+                super().execute_sql(
+                    f"CALL DOLT_COMMIT('-Am', {_quote('branch point of ' + branch_name)}, "
+                    f"'--author', {_quote(COMMIT_AUTHOR)})"
+                )
+            except Exception as e:
+                if "nothing to commit" not in str(e):
+                    raise
         super().execute_sql(f"CALL DOLT_CHECKOUT('-b', {_quote(branch_name)})")
 
     def _connect_branch_impl(self, branch_name: str) -> None:
