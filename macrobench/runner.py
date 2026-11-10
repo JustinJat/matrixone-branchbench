@@ -313,6 +313,8 @@ def _is_retryable_error(e):
             "branches limit",
             "endpoints limit",
             "limit reached",
+            "423 client error",  # Neon: running conflicting operations (11-10)
+            "conflicting operations",
         )
     ):
         return True
@@ -905,7 +907,11 @@ def main():
         print(f"Estimated bytes per step: {bytes_per_step:,}")
 
     # Neon limits active branches to 20 (including the default branch).
-    max_active = 20 if config.backend == tp.Backend.NEON else 0
+    max_active = (
+        int(os.environ.get("NEON_MAX_ACTIVE", "20"))
+        if config.backend == tp.Backend.NEON
+        else 0
+    )
     if max_active:
         print(f"Branch limit: {max_active} active branches (Neon)")
 

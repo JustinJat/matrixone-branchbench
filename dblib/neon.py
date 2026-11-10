@@ -17,6 +17,35 @@ API_KEY = os.environ.get("NEON_API_KEY_ORG", "")
 neon = NeonAPI(api_key=API_KEY)
 NEON_API_BASE_URL = "https://console.neon.tech/api/v2/"
 
+# Settings from the environment (11-10, justin/oldbb). Unset, everything is as before.
+NEON_COMPUTE_CU = float(os.environ.get("NEON_COMPUTE_CU", "0"))
+NEON_PG_VERSION = int(os.environ.get("NEON_PG_VERSION", "17"))
+NEON_REGION = os.environ.get("NEON_REGION", "aws-us-east-1")
+NEON_KEEP_PROJECTS = os.environ.get("NEON_KEEP_PROJECTS", "0") == "1"
+NEON_USAGE_LOG = os.environ.get("NEON_USAGE_LOG", "")
+
+
+def _cu_limits() -> dict:
+    """Fixed compute size (min = max) when NEON_COMPUTE_CU > 0, else nothing (the plan's default)."""
+    if NEON_COMPUTE_CU <= 0:
+        return {}
+    return {
+        "autoscaling_limit_min_cu": NEON_COMPUTE_CU,
+        "autoscaling_limit_max_cu": NEON_COMPUTE_CU,
+    }
+
+
+def _usage_event(event: str, project_id: str, name: str = "") -> None:
+    """One JSON line per project event in NEON_USAGE_LOG (for oldbb/neon_usage.py)."""
+    if not NEON_USAGE_LOG:
+        return
+    import json
+
+    rec = {"event": event, "project_id": project_id, "name": name, "time": time.time(),
+           "compute_cu": NEON_COMPUTE_CU, "pg_version": NEON_PG_VERSION, "region": NEON_REGION}
+    with open(NEON_USAGE_LOG, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+
 
 class NeonToolSuite(DBToolSuite):
     """
@@ -27,13 +56,17 @@ class NeonToolSuite(DBToolSuite):
     def create_neon_project(cls, project_name: str) -> str:
         project_dict = {
             "project": {
-                "pg_version": 17,
+                "pg_version": NEON_PG_VERSION,
                 "name": project_name,
-                "region_id": "aws-us-east-1",
+                "region_id": NEON_REGION,
             }
         }
+        if _cu_limits():
+            project_dict["project"]["default_endpoint_settings"] = _cu_limits()
         # TODO: Handle project creation failures.
-        return cls._request("POST", "projects", json=project_dict)
+        project = cls._request("POST", "projects", json=project_dict)
+        _usage_event("created", project["project"]["id"], project_name)
+        return project
 
     @classmethod
     def delete_project(cls, project_id: str, timeout: int = 30) -> None:
@@ -44,6 +77,12 @@ class NeonToolSuite(DBToolSuite):
             project_id: Neon project ID to delete.
             timeout: Maximum seconds to wait for deletion (default: 30).
         """
+        if NEON_KEEP_PROJECTS:
+            cls._delete_child_branches(project_id)
+            _usage_event("kept", project_id)
+            print(f"Neon project {project_id} kept (NEON_KEEP_PROJECTS=1); child branches deleted.")
+            return
+        _usage_event("deleted", project_id)
         result = {"error": None, "success": False}
 
         def _delete():
@@ -64,6 +103,25 @@ class NeonToolSuite(DBToolSuite):
             print(f"Warning: Neon project deletion failed: {result['error']}")
         elif result["success"]:
             print(f"Neon project {project_id} deleted successfully.")
+
+    @classmethod
+    def _delete_child_branches(cls, project_id: str) -> None:
+        """Delete every branch except the default one, leaves first (Neon refuses a branch with children)."""
+        for _ in range(60):
+            branches = cls._request("GET", f"projects/{project_id}/branches")["branches"]
+            children = [b for b in branches if not b.get("default")]
+            if not children:
+                return
+            parents = {b.get("parent_id") for b in branches}
+            for b in children:
+                if b["id"] in parents:
+                    continue
+                try:
+                    cls._request("DELETE", f"projects/{project_id}/branches/{b['id']}")
+                except requests.exceptions.HTTPError as e:
+                    print(f"Warning: could not delete Neon branch {b['id']} yet: {e}")
+            time.sleep(2)
+        print(f"Warning: child branches left in Neon project {project_id}")
 
     @classmethod
     def init_for_bench(
@@ -204,13 +262,15 @@ class NeonToolSuite(DBToolSuite):
         A branch can contain multiple databases, not the other way around.
         """
         branch_payload = {
-            "endpoints": [{"type": "read_write"}],
+            "endpoints": [{"type": "read_write", **_cu_limits()}],
             "branch": {"name": branch_name, "parent_id": parent_id},
         }
 
-        # This returns a BranchOperations object with .branch attribute
-        new_branch = neon.branch_create(self.project_id, **branch_payload)
-        self._all_branches[branch_name] = (new_branch.branch.id, "")
+        # The same POST as neon_api's branch_create, without the SDK's pydantic models (11-10).
+        new_branch = self.__class__._request(
+            "POST", f"projects/{self.project_id}/branches", json=branch_payload
+        )
+        self._all_branches[branch_name] = (new_branch["branch"]["id"], "")
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
