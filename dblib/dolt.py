@@ -31,7 +31,7 @@ def commit_dolt_schema(db_uri: str, message: str = "Load SQL schema") -> None:
         cur.execute(f"SELECT dolt_commit('-m', '{message}');")
         print(f"Dolt schema committed: {message}")
     except Exception as e:
-        print(f"Warning: Dolt schema commit failed (may be okay): {e}")
+        raise RuntimeError("DoltgreSQL schema commit failed") from e
     finally:
         if cur:
             cur.close()

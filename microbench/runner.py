@@ -147,7 +147,7 @@ def create_backend_project(config: tp.TaskConfig, output_dir: str = "/tmp/run_st
     if backend == tp.Backend.DOLT:
         info.default_uri = DoltToolSuite.get_default_connection_uri()
         info.default_branch_name = "main"
-        print(f"Default Dolt connection URI: {info.default_uri}")
+        print("DoltgreSQL backend initialized")
 
     elif backend == tp.Backend.KPG:
         info.default_uri = KpgToolSuite.get_default_connection_uri()
@@ -439,6 +439,8 @@ def cleanup_backend(
             print(f"Database '{db_name}' deleted successfully.")
         except Exception as e:
             print(f"Error deleting database: {e}")
+            if config.backend == tp.Backend.DOLT:
+                raise
         finally:
             if cur:
                 cur.close()

@@ -27,8 +27,9 @@ MO_HOST = os.environ.get("MO_HOST", "127.0.0.1")
 MO_PORT = int(os.environ.get("MO_PORT", "6001"))
 
 
-def _connect(db_name: str = None, autocommit: bool = False) -> pymysql.connections.Connection:
+def _connect(db_name: str = None, autocommit: bool = False, timeout: float = None) -> pymysql.connections.Connection:
     """Open a pymysql connection to MatrixOne."""
+    timeout = timeout or float(os.environ.get("MO_QUERY_TIMEOUT_SEC", "1800"))
     return pymysql.connect(
         host=MO_HOST,
         port=MO_PORT,
@@ -37,6 +38,9 @@ def _connect(db_name: str = None, autocommit: bool = False) -> pymysql.connectio
         database=db_name,
         autocommit=autocommit,
         local_infile=True,
+        connect_timeout=5,
+        read_timeout=timeout,
+        write_timeout=timeout,
     )
 
 
@@ -187,8 +191,8 @@ class MoToolSuite(DBToolSuite):
                 f"{{SNAPSHOT = '{snap}'}};"
             )
         finally:
-            # The clone is a full materialized copy; the snapshot is no longer
-            # needed. Best-effort cleanup so snapshots don't accumulate.
+            # The clone has its own metadata references to shared immutable objects.
+            # The temporary snapshot is no longer needed after cloning.
             try:
                 super().execute_sql(f"DROP SNAPSHOT {snap};")
             except Exception:

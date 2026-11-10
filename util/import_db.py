@@ -1,8 +1,11 @@
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Union
+
+from psycopg2.extensions import make_dsn, parse_dsn
 
 
 def load_sql_file(
@@ -33,11 +36,17 @@ def load_sql_file(
     if verbose:
         print(f"Loading SQL file via psql: {sql_file_path}")
 
-    # Build psql command with connection URI
-    # Use -a (echo all) or -e (echo queries) for progress when verbose
+    params = parse_dsn(connection_uri)
+    env = dict(os.environ)
+    password = params.pop("password", None)
+    if password is not None:
+        env["PGPASSWORD"] = password
+    env.setdefault("PGCONNECT_TIMEOUT", "5")
+    # Keep credentials out of argv and ignore any local psql startup file.
     cmd = [
         "psql",
-        connection_uri,
+        make_dsn(**params),
+        "-X",
         "-f",
         str(sql_file_path),
         "-v",
@@ -50,27 +59,17 @@ def load_sql_file(
         cmd.append("-q")  # Quiet mode
 
     try:
-        # Use Popen for real-time output streaming
-        process = subprocess.Popen(
+        # The parent driver already redirects output to its per-run log. Never
+        # wait on undrained stdout/stderr pipes, which can deadlock a seed load.
+        process = subprocess.run(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,  # Line buffered
+            stdout=None if verbose else subprocess.DEVNULL,
+            env=env,
+            check=False,
         )
 
-        # Stream stdout in real-time
-        if verbose:
-            for line in process.stdout:
-                print(line, end="")
-
-        # Wait for completion and get return code
-        process.wait()
-
         if process.returncode != 0:
-            stderr = process.stderr.read()
-            print(f"✗ Error executing SQL file: {stderr}", file=sys.stderr)
-            raise RuntimeError(f"psql failed: {stderr}")
+            raise RuntimeError(f"psql failed with exit code {process.returncode}; see the runner log")
 
         if verbose:
             print(f"✓ Successfully executed SQL file: {sql_file_path}")

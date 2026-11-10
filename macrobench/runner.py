@@ -23,6 +23,7 @@ from google.protobuf import text_format
 from macrobench import task_pb2 as tp
 from macrobench.branch_tree import BranchTree
 from macrobench.workflows import get_workflow_ops, WorkflowOps
+from macrobench.validation import summarize_run_validity
 
 from dblib import result_collector as rc
 
@@ -62,7 +63,7 @@ FileCopyToolSuite = _optional_suite(
 TxnToolSuite = _optional_suite(
     lambda: __import__("dblib.transaction", fromlist=["TxnToolSuite"]), "TxnToolSuite"
 )
-from dblib.matrixone import MoToolSuite
+from dblib.matrixone import MoToolSuite, _connect as mo_connect
 
 
 def _create_db_tools(config, backend_info, result_collector):
@@ -246,6 +247,7 @@ def _run_cross_branch_queries(
     measure_storage: bool = False,
 ):
     """Execute cross-branch compare queries on pre-committed leaf branches."""
+    errors = 0
     leaves = branch_tree.get_pre_committed_leaves()
     for node in leaves:
         if not node.alive:
@@ -277,15 +279,18 @@ def _run_cross_branch_queries(
                         query, timed=True, storage=measure_storage
                     )
                 except Exception as e:
+                    errors += 1
                     progress.write(
                         f"[T{thread_id}] Compare query failed on "
-                        f"{node.name}: {type(e).__name__}"
+                        f"{node.name}: {type(e).__name__}: {e}"
                     )
         except Exception as e:
+            errors += 1
             progress.write(
                 f"[T{thread_id}] Connect failed for compare on "
-                f"{node.name}: {type(e).__name__}"
+                f"{node.name}: {type(e).__name__}: {e}"
             )
+    return errors
 
 
 def _is_retryable_error(e):
@@ -454,6 +459,15 @@ def worker_fn(
     steps_finished = 0
     ops_finished = 0
     status = "completed"
+    operation_errors = {}
+    operation_error_examples = []
+
+    def record_error(operation, error):
+        operation_errors[operation] = operation_errors.get(operation, 0) + 1
+        if len(operation_error_examples) < 3:
+            operation_error_examples.append(
+                f"{operation}: {type(error).__name__}: {error}"
+            )
 
     try:
         step_id = 0
@@ -519,6 +533,7 @@ def worker_fn(
             except Exception as e:
                 if stop_event and stop_event.is_set():
                     raise _WorkerStopped()
+                record_error("branch", e)
                 if verbose:
                     progress.write(
                         f"[T{thread_id}] Branch create failed at step "
@@ -558,6 +573,7 @@ def worker_fn(
                 except Exception as e:
                     if stop_event and stop_event.is_set():
                         raise _WorkerStopped()
+                    record_error("ddl", e)
                     if verbose:
                         progress.write(
                             f"[T{thread_id}] DDL failed at step "
@@ -581,6 +597,7 @@ def worker_fn(
                 except Exception as e:
                     if stop_event and stop_event.is_set():
                         raise _WorkerStopped()
+                    record_error("dml", e)
                     if verbose:
                         progress.write(
                             f"[T{thread_id}] DML failed at step "
@@ -602,6 +619,7 @@ def worker_fn(
                 except Exception as e:
                     if stop_event and stop_event.is_set():
                         raise _WorkerStopped()
+                    record_error("evaluate", e)
                     if verbose:
                         progress.write(
                             f"[T{thread_id}] Eval failed at step {step_id}: {e}"
@@ -615,7 +633,7 @@ def worker_fn(
             if cb_sync.try_claim_and_wait(step_id):
                 branch_tree.begin_cross_branch()
                 try:
-                    _run_cross_branch_queries(
+                    compare_errors = _run_cross_branch_queries(
                         db_tools,
                         branch_tree,
                         workflow_ops,
@@ -624,6 +642,10 @@ def worker_fn(
                         result_collector=result_collector,
                         measure_storage=measure_storage,
                     )
+                    if compare_errors:
+                        operation_errors["compare"] = (
+                            operation_errors.get("compare", 0) + compare_errors
+                        )
                 finally:
                     branch_tree.end_cross_branch()
 
@@ -665,6 +687,7 @@ def worker_fn(
                     branch_tree.mark_dead(child_node)
                     if stop_event and stop_event.is_set():
                         raise _WorkerStopped()
+                    record_error("prune", e)
                     if verbose:
                         progress.write(
                             f"[T{thread_id}] Prune failed at step "
@@ -684,6 +707,8 @@ def worker_fn(
     except Exception as e:
         status = f"crashed: {type(e).__name__}: {e}"
     finally:
+        if status == "completed" and operation_errors:
+            status = "completed_with_errors"
         # Reset step_id to -1 after worker finishes
         result_collector.record_step_id(-1)
 
@@ -692,6 +717,8 @@ def worker_fn(
                 "steps": steps_finished,
                 "ops": ops_finished,
                 "status": status,
+                "operation_errors": operation_errors,
+                "operation_error_examples": operation_error_examples,
             }
         db_tools.close_connection()
 
@@ -813,6 +840,11 @@ def main():
         default=0,
         help="Cap total workflow runtime in seconds (0 = no limit).",
     )
+    parser.add_argument(
+        "--strict-operations",
+        action="store_true",
+        help="Exit nonzero if any worker step or SQL operation failed.",
+    )
 
     args = parser.parse_args()
 
@@ -923,12 +955,26 @@ def main():
         time.time() + args.max_runtime_sec if args.max_runtime_sec else None
     )
     completed_work = {}
+    future_errors = 0
 
     stop_event = threading.Event()
     worker_conns = {}
 
     def _on_deadline():
         stop_event.set()
+        if config.backend == tp.Backend.MATRIXONE:
+            try:
+                # PyMySQL has no cancel(); use a separate control connection.
+                with mo_connect(autocommit=True, timeout=5) as control:
+                    for conn in list(worker_conns.values()):
+                        if conn.open:
+                            try:
+                                control.kill(conn.thread_id())
+                            except Exception:
+                                pass
+            except Exception:
+                pass  # The driver's hard process-group timeout remains the fallback.
+            return
         for conn in list(worker_conns.values()):
             try:
                 conn.cancel()
@@ -966,6 +1012,7 @@ def main():
                 try:
                     future.result()
                 except Exception as e:
+                    future_errors += 1
                     print(f"Worker failed: {e}")
 
         progress.close()
@@ -1022,6 +1069,10 @@ def main():
         total_estimated_bytes = sum(
             v["steps"] * bytes_per_step for v in completed_work.values()
         )
+        validity = summarize_run_validity(
+            completed_work, num_workers, config.setup.total_steps, timed_out,
+            future_errors,
+        )
         e2e_stats = {
             "run_id": config.run_id,
             "backend": tp.Backend.Name(config.backend),
@@ -1041,6 +1092,18 @@ def main():
                 str(k): v.get("status", "unknown")
                 for k, v in completed_work.items()
             },
+            "operation_errors": {
+                str(k): v.get("operation_errors", {})
+                for k, v in completed_work.items()
+            },
+            "operation_error_examples": {
+                str(k): v.get("operation_error_examples", [])
+                for k, v in completed_work.items()
+                if v.get("operation_error_examples")
+            },
+            "total_operation_errors": validity["total_operation_errors"],
+            "run_valid": validity["valid"],
+            "invalid_reasons": validity["invalid_reasons"],
             "estimated_bytes_per_step": bytes_per_step,
             "total_estimated_bytes_written": total_estimated_bytes,
         }
@@ -1072,6 +1135,7 @@ def main():
         result_collector.write_to_parquet()
 
         # Cleanup (retry once on transient network errors)
+        cleanup_failed = False
         for attempt in range(2):
             try:
                 cleanup_backend(micro_config, backend_info)
@@ -1083,6 +1147,10 @@ def main():
                 else:
                     print(f"Cleanup failed after retry: {e}")
                     print("You may need to delete the Neon project manually.")
+                    cleanup_failed = True
+
+        if args.strict_operations and (not validity["valid"] or cleanup_failed):
+            raise SystemExit(2)
 
 
 if __name__ == "__main__":
