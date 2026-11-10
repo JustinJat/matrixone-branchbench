@@ -1,0 +1,16 @@
+# matrixone-branchbench-mo 4.2.5/requirements.txt (pinned, unchanged)
+anytree==2.13.0
+Faker==40.43.0
+grpcio==1.84.0
+grpcio-tools==1.84.0
+protobuf==7.36.2
+psycopg2-binary==2.9.13
+pyarrow==26.0.0
+PyMySQL==1.2.3
+setuptools==84.0.0
+tqdm==4.70.1
+typing_extensions==4.16.0
+# the Neon backend's imports (dblib/neon.py), not in the 4.2.5 list because 4.2.5 runs MO and DoltgreSQL only
+neon-api==0.3.0
+python-dotenv
+requests
