@@ -15,6 +15,12 @@ dedicated container is restarted before each workflow's r1). Differences:
              its reasons and completed steps, and the next run starts (4.2.5 stops at the first invalid sample).
   hook       --hook DIR puts DIR on the runner's PYTHONPATH with BB_COUNT=1 (oldbb/rttcount: per timed operation the
              SQL statements, connections, HTTP requests and sleeps, and branch-slot waits, in verb_counts.jsonl).
+  dolt seed  --dolt-data-dir HOSTDIR (11-10, for SF100): the Dolt seed is loaded and committed ONCE into a seed database
+             (bb_seed_w<W>), and every run gets a copy of its directory (container stopped, cp -a in a throw-away
+             container of the same image, container started: a cold start for every run); the runner then uses it as
+             an existing database. Without it, the runner regenerates the seed rows in Dolt for every run.
+  dolt fair  DOLT_COMMIT_BEFORE_BRANCH=1 in the environment (dblib/dolt_mysql.py): branches start from the parent's
+             current state, as on MatrixOne and Neon; recorded in metadata.json.
 Output: <output>/configs, <run>.log, results/<run>/ (parquet, e2e_stats.json, verb_counts.jsonl), summary.jsonl,
 metadata.json, driver.log. Connection settings come from the environment (MO_*, DOLT_MYSQL_*, NEON_*).
 """
@@ -141,7 +147,7 @@ def render_configs(args, tp, text_format, tag, dumps):
             item.database_setup.db_name = f"bb_{workflow}_{tag[-12:]}_r{rep}"
             item.database_setup.cleanup = True
             item.database_setup.ClearField("source")
-            if args.backend == "MATRIXONE":
+            if args.backend == "MATRIXONE" or (args.backend == "DOLT_MYSQL" and args.dolt_data_dir):
                 item.database_setup.existing_db.branch_id = "main"
             else:
                 item.database_setup.sql_dump.sql_dump_path = str(dumps[args.backend])
@@ -249,6 +255,27 @@ def mysql_cleanup_owned(backend, db, keep=()):
         if name not in keep and (name == db or name.startswith(db + "_br_")):
             identifier(name)
             query(backend, f"DROP DATABASE IF EXISTS `{name}`")
+    if backend == "DOLT_MYSQL":   # Dolt keeps dropped databases for undrop; give the space back
+        query(backend, "CALL DOLT_PURGE_DROPPED_DATABASES()")
+
+
+def dolt_seed_gate(seed_db, scale):
+    if seed_db not in {str(r[0]) for r in query("DOLT_MYSQL", "SHOW DATABASES")}:
+        return False
+    counts = {t: int(query("DOLT_MYSQL", f"SELECT COUNT(*) FROM `{seed_db}`.`{t}`")[0][0]) for t in TABLES}
+    status = query("DOLT_MYSQL", "SELECT COUNT(*) FROM dolt_status", database=seed_db)[0][0]
+    return counts == seed.expected_counts(scale) and int(status) == 0
+
+
+def dolt_copy_seed(container, data_dir, seed_db, db, log):
+    """Cold copy of the seed database's directory: stop the server, cp -a, start it again."""
+    image = subprocess.check_output(["docker", "inspect", "-f", "{{.Config.Image}}", container], text=True).strip()
+    subprocess.run(["docker", "stop", "-t", "300", container], stdout=log, stderr=log, check=True, timeout=600)
+    subprocess.run(["docker", "run", "--rm", "--log-driver", "none", "--entrypoint", "cp", "-v",
+                    f"{data_dir}:/var/lib/dolt", image, "-a", f"/var/lib/dolt/{seed_db}", f"/var/lib/dolt/{db}"],
+                   stdout=log, stderr=log, check=True, timeout=7200)
+    subprocess.run(["docker", "start", container], stdout=log, stderr=log, check=True, timeout=600)
+    ready("DOLT_MYSQL", max_wait=900)
 
 
 def main(argv=None):
@@ -268,6 +295,8 @@ def main(argv=None):
     ap.add_argument("--steps", type=int)
     ap.add_argument("--workflows", nargs="+", choices=WORKFLOWS, default=list(WORKFLOWS))
     ap.add_argument("--hook", type=Path, help="counting hook directory (oldbb/rttcount)")
+    ap.add_argument("--dolt-data-dir", type=Path,
+                    help="DOLT_MYSQL: host directory mounted at /var/lib/dolt; seed loaded once, copied per run")
     ap.add_argument("--check", action="store_true", help="write configs and seed SQL only")
     args = ap.parse_args(argv)
     if min([args.scale, args.reps, args.timeout, args.max_runtime_sec]
@@ -321,6 +350,8 @@ def main(argv=None):
                 meta["server_version"] = str(query(sqlb, "SELECT VERSION()")[0][0])
                 if args.backend == "DOLT_MYSQL":
                     meta["dolt_version"] = str(query(sqlb, "SELECT dolt_version()")[0][0])
+                    meta["dolt_commit_before_branch"] = os.environ.get("DOLT_COMMIT_BEFORE_BRANCH", "0") == "1"
+                    meta["dolt_data_dir"] = str(args.dolt_data_dir or "")
                 if args.container:
                     info = json.loads(subprocess.check_output(["docker", "inspect", args.container]))[0]
                     meta.update(container=args.container, container_image=info["Config"]["Image"],
@@ -335,14 +366,38 @@ def main(argv=None):
                     secs = mo_load_seed(args.seed_db, args.scale, dlog)
                     note(f"seed {args.seed_db} loaded in {secs:.1f}s")
                 meta["seed_db"] = args.seed_db
+            dolt_copy = args.backend == "DOLT_MYSQL" and args.dolt_data_dir is not None
+            if dolt_copy:
+                if not args.container:
+                    raise RuntimeError("--dolt-data-dir needs --container")
+                if dolt_seed_gate(args.seed_db, args.scale):
+                    note(f"Dolt seed {args.seed_db} present, row counts match W={args.scale}, nothing uncommitted")
+                else:
+                    if args.seed_db in {str(r[0]) for r in query(sqlb, "SHOW DATABASES")}:
+                        raise RuntimeError(f"Dolt seed {args.seed_db} exists but fails the gate; drop it first")
+                    sys.path.insert(0, str(args.repo))
+                    from dblib import dolt_mysql
+                    started = time.monotonic()
+                    dolt_mysql.load_and_commit(args.seed_db, str(root / f"seed_w{args.scale}_mysql.sql"),
+                                               message=f"BranchBench seed W={args.scale}")
+                    if not dolt_seed_gate(args.seed_db, args.scale):
+                        raise RuntimeError("Dolt seed row counts do not match")
+                    note(f"Dolt seed {args.seed_db} loaded and committed in {time.monotonic() - started:.1f}s")
+                meta["seed_db"] = args.seed_db
             (root / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
             for workflow, rep, config in configs:
                 rep_started, t0 = time.monotonic(), time.time()
-                if rep == 1 and args.container:
+                db = config.database_setup.db_name
+                setup_sec = None
+                if dolt_copy:   # a cold start for every run: the copy needs the server stopped
+                    s0 = time.monotonic()
+                    dolt_copy_seed(args.container, args.dolt_data_dir.resolve(), args.seed_db, db, dlog)
+                    setup_sec = round(time.monotonic() - s0, 1)
+                    note(f"{workflow} r{rep}: seed copied to {db} in {setup_sec}s (server restarted)")
+                elif rep == 1 and args.container:
                     subprocess.run(["docker", "restart", "-t", "300", args.container], stdout=dlog, stderr=dlog,
                                    check=True, timeout=600)
                     ready(sqlb)
-                db = config.database_setup.db_name
                 if args.backend == "MATRIXONE":
                     mo_clone_seed(db, args.seed_db, f"bb_snap_{tag[-12:]}_{workflow}_r{rep}")
                 out = root / "results" / f"{workflow}_r{rep}"
@@ -379,7 +434,8 @@ def main(argv=None):
                         note(f"health/cleanup: {type(error).__name__}: {error}")
                 done = sum((stats.get("completed_steps") or {}).values())
                 total = config.setup.workers * config.setup.total_steps
-                row = {"workflow": workflow, "rep": rep, "phase": "cold" if rep == 1 else "warm",
+                row = {"workflow": workflow, "rep": rep, "phase": "cold" if rep == 1 or dolt_copy else "warm",
+                       "setup_sec": setup_sec,
                        "backend": args.backend, "scale": args.scale, "mini": args.mini, "rc": rc,
                        "elapsed_sec": stats.get("elapsed_sec"), "wall_sec": round(wall, 2),
                        "rep_wall_sec": round(time.monotonic() - rep_started, 2), "start_unix": t0,

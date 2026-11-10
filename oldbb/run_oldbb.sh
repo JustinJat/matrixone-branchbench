@@ -15,13 +15,20 @@
 #         backend's own), active-branch cap NEON_MAX_ACTIVE=20 (the runner's own), one project per run; with
 #         NEON_KEEP_PROJECTS=1 the project is kept (child branches deleted) so that oldbb/neon_usage.py can read its
 #         billed CU-hours an hour later and then delete it. Export NEON_API_KEY_ORG first (never printed).
-# Per system: a mini pass first (the 4.2.5 smoke shape: 1-2 workers, 1 step, all workflows, same W data; a workflow
-# that does not finish its steps skips that system's full runs), then the full runs, REPS each, 2 h worker cap (MAXRT, the paper's), TIMEOUT per
-# runner process. Results: newbb/results/oldbb_<time>/<system>_{mini,w<W>}/ (summary.jsonl, logs, parquet,
-# verb_counts.jsonl), packed into /ssd_root/wang7693/branchbench/oldbb_<time>.tar.gz. Stop: touch mon/STOP_OLDBB.
+# Dolt variants (11-10, second version): "fair" (DOLT_WORKFLOWS, default all) commits the parent's working set before
+# branching (DOLT_COMMIT_BEFORE_BRANCH=1), so a branch starts from its parent's current state as on MO and Neon; "orig"
+# (DOLT_ORIG_WORKFLOWS, default none) is the paper's behaviour (autocommit: true, never Dolt-committed, so every branch
+# starts from the seed commit). The Dolt seed is loaded and committed once (bb_seed_w<W>) and copied per run.
+# Per system: a mini pass first (the 4.2.5 smoke shape: 1-2 workers, 1 step, that system's workflows, same W data; MO_MINI
+# / DOLT_MINI / NEON_MINI, default MINI=1; a workflow that does not finish its steps skips that system's full runs),
+# then the full runs, REPS each, 2 h worker cap (MAXRT, the paper's), TIMEOUT per runner process. Results:
+# newbb/results/oldbb_<time>/{mo,dolt_fair,dolt,neon}_{mini,w<W>}/ (summary.jsonl, logs, parquet, verb_counts.jsonl),
+# packed into /ssd_root/wang7693/branchbench/oldbb_<time>.tar.gz. Stop: touch mon/STOP_OLDBB.
 # Usage (from the work dir): nohup bash $(cat ../newbb/OLDBB_DIR)/oldbb/run_oldbb.sh > mon/oldbb.log 2>&1 &
-#   env: SYSTEMS="mo dolt neon" W=1 WORKFLOWS="..." NEON_WORKFLOWS="..." REPS=1 MAXRT=7200 TIMEOUT=14400 MINI=1
-#        MOBIN DOLT_VER=2.5.1 CPUS=16 MEMORY=64g NEON_COMPUTE_CU=16 NEON_REGION NEON_MAX_ACTIVE NEON_KEEP_PROJECTS=1
+#   env: SYSTEMS="mo dolt neon" W=1 WORKFLOWS (default all 5) MO_WORKFLOWS DOLT_WORKFLOWS DOLT_ORIG_WORKFLOWS NEON_WORKFLOWS
+#        REPS=1 MAXRT=7200 TIMEOUT=14400 MINI=1 MO_MINI DOLT_MINI NEON_MINI AVAIL_MIN (G free on /ssd_root to start;
+#        default 100, 300 for W >= 50) MOBIN DOLT_VER=2.5.1 CPUS=16 MEMORY=64g NEON_COMPUTE_CU=16 NEON_REGION
+#        NEON_MAX_ACTIVE NEON_KEEP_PROJECTS=1
 cd /ssd_root/wang7693/branchbench/matrixone-branchbench-mo-bench-both || exit 1
 B=/ssd_root/wang7693/branchbench
 T=$B/newbb
@@ -31,11 +38,16 @@ SYSTEMS=${SYSTEMS:-"mo dolt neon"}
 W=${W:-1}
 ALLWF="software_dev failure_repro data_cleaning mcts simulation"
 WORKFLOWS=${WORKFLOWS:-$ALLWF}
-NEON_WORKFLOWS=${NEON_WORKFLOWS:-$WORKFLOWS}
+MO_WORKFLOWS=${MO_WORKFLOWS-$WORKFLOWS}
+DOLT_WORKFLOWS=${DOLT_WORKFLOWS-$WORKFLOWS}
+DOLT_ORIG_WORKFLOWS=${DOLT_ORIG_WORKFLOWS-}
+NEON_WORKFLOWS=${NEON_WORKFLOWS-$WORKFLOWS}
 REPS=${REPS:-1}
 MAXRT=${MAXRT:-7200}
 TIMEOUT=${TIMEOUT:-14400}
 MINI=${MINI:-1}
+MO_MINI=${MO_MINI:-$MINI}; DOLT_MINI=${DOLT_MINI:-$MINI}; NEON_MINI=${NEON_MINI:-$MINI}
+AVAIL_MIN=${AVAIL_MIN:-$([ $W -ge 50 ] && echo 300 || echo 100)}
 CPUS=${CPUS:-16}; MEMORY=${MEMORY:-64g}
 MOBIN=${MOBIN:-$(cat $B/src/ZUYU_MO_SRC_DIR 2>/dev/null)}
 TEMPLATE=${TEMPLATE:-mo-main-latest}
@@ -99,13 +111,18 @@ fresh_dolt() {
   mysql -h127.0.0.1 -P$DPORT -uroot -p111 -N -e "select 1" >/dev/null 2>&1 || { log "$DC does not answer"; docker logs --tail 30 $DC 2>&1 | cut -c1-300; return 1; }
   log "dolt up: $DIMG, version $(mysql -h127.0.0.1 -P$DPORT -uroot -p111 -N -e 'select dolt_version()' 2>/dev/null), max_connections $(mysql -h127.0.0.1 -P$DPORT -uroot -p111 -N -e 'select @@max_connections' 2>/dev/null), cpus $(docker inspect -f '{{.HostConfig.NanoCpus}}' $DC), memory $(docker inspect -f '{{.HostConfig.Memory}}' $DC)"
 }
-drive() {   # $1 system  $2 mini|full ; returns the driver's exit code
-  local s=$1 mode=$2 be ctr=() wf=$WORKFLOWS extra=() od
-  case $s in mo) be=MATRIXONE; ctr=(--container $MC) ;; dolt) be=DOLT_MYSQL; ctr=(--container $DC) ;; neon) be=NEON; wf=$NEON_WORKFLOWS ;; esac
+drive() {   # $1 mo|dolt_fair|dolt|neon  $2 mini|full  $3 workflows ; returns the driver's exit code
+  local s=$1 mode=$2 wf=$3 be ctr=() extra=() od fair=0
+  case $s in
+    mo)        be=MATRIXONE; ctr=(--container $MC) ;;
+    dolt_fair) be=DOLT_MYSQL; ctr=(--container $DC --dolt-data-dir $DDATA); fair=1 ;;
+    dolt)      be=DOLT_MYSQL; ctr=(--container $DC --dolt-data-dir $DDATA) ;;
+    neon)      be=NEON ;;
+  esac
   if [ $mode = mini ]; then od=$OUT/${s}_mini; extra=(--mini --reps 1); else od=$OUT/${s}_w$W; extra=(--reps $REPS); fi
   log "$s $mode: workflows $wf"
-  ( cd $D && $PY oldbb/run_oldbb.py --backend $be --scale $W "${ctr[@]}" "${extra[@]}" --workflows $wf \
-      --max-runtime-sec $MAXRT --timeout $TIMEOUT --hook $D/oldbb/rttcount --output $od ) > $OUT/logs/${s}_$mode.log 2>&1
+  ( cd $D && DOLT_COMMIT_BEFORE_BRANCH=$fair $PY oldbb/run_oldbb.py --backend $be --scale $W "${ctr[@]}" "${extra[@]}" \
+      --workflows $wf --max-runtime-sec $MAXRT --timeout $TIMEOUT --hook $D/oldbb/rttcount --output $od ) > $OUT/logs/${s}_$mode.log 2>&1
   local rc=$?
   log "$s $mode: driver rc=$rc (0 all samples complete, 3 some incomplete, 1 driver stopped)"
   python3 - $od/summary.jsonl <<'EOF' 2>/dev/null | sed 's/^/   /'
@@ -134,7 +151,7 @@ flock -n 9 || { log "another run_oldbb.sh is running, stop"; exit 1; }
 pgrep -f "run_branchbenc[h]\.py|macrobench\.runne[r]|microbench\.runner[2]|oldbb/run_oldb[b]\.py" >/dev/null && { log "a benchmark is running, stop"; exit 1; }
 [ -e mon/STOP_OLDBB ] && { log "mon/STOP_OLDBB exists: remove it and start again"; exit 1; }
 [ -x $PY ] && [ -f $D/oldbb/run_oldbb.py ] || { log "$D has no .venv (run oldbb/setup_env.sh first), stop"; exit 1; }
-[ "$(avail)" -ge 100 ] || { log "/ssd_root < 100G free, stop"; exit 1; }
+[ "$(avail)" -ge $AVAIL_MIN ] || { log "/ssd_root has $(avail)G free, less than AVAIL_MIN=${AVAIL_MIN}G, stop"; exit 1; }
 for s in $SYSTEMS; do case $s in
   mo)   [ -f mon/final_run_cmd.py ] && grep -q -- '--cpus' mon/final_run_cmd.py || { log "mon/final_run_cmd.py (with --cpus) missing, stop"; exit 1; }
         [ -n "$MOBIN" ] && [ -x "$MOBIN/mo-service" ] || { log "MO binary '$MOBIN/mo-service' missing (MOBIN / src/ZUYU_MO_SRC_DIR), stop"; exit 1; }
@@ -160,7 +177,8 @@ mkdir -p $OUT/logs $OUT/neon
 export NEON_USAGE_LOG=$OUT/neon/neon_projects.jsonl
 { echo "started        $(date -u '+%F %T') UTC"
   echo "tree           $D ($(cat $D/FORK_SOURCE 2>/dev/null)); script md5 $(md5sum $0 | cut -c1-32)"
-  echo "systems        $SYSTEMS ; W=$W ; workflows $WORKFLOWS (neon: $NEON_WORKFLOWS) ; reps $REPS ; mini pass $MINI"
+  echo "systems        $SYSTEMS ; W=$W ; reps $REPS ; mini pass mo $MO_MINI, dolt $DOLT_MINI, neon $NEON_MINI ; /ssd_root free $(avail)G"
+  echo "workflows      mo: $MO_WORKFLOWS | dolt fair: $DOLT_WORKFLOWS | dolt orig (paper): ${DOLT_ORIG_WORKFLOWS:-none} | neon: $NEON_WORKFLOWS"
   echo "limits         worker cap ${MAXRT}s (paper 2 h), runner process cap ${TIMEOUT}s"
   echo "mo             $MOBIN/mo-service ($( [ -n "$MOBIN" ] && md5sum $MOBIN/mo-service 2>/dev/null | cut -c1-12)), image $IMG, template $TEMPLATE, cpus $CPUS, memory $MEMORY"
   echo "dolt           $DIMG, cpus $CPUS, memory $MEMORY, max_connections 2000, port $DPORT"
@@ -181,11 +199,20 @@ for s in $SYSTEMS; do
           echo "before $(rtt rtt-probe.${NEON_REGION#aws-}.aws.neon.tech 5432)" >> $OUT/neon/rtt.txt
           sed 's/^/   rtt /' $OUT/neon/rtt.txt ;;
   esac
-  if [ "$MINI" = 1 ]; then
-    drive $s mini || { log "$s: the mini pass did not complete every workflow (log $OUT/logs/${s}_mini.log), skipping its full runs"; continue; }
-  fi
-  [ -e mon/STOP_OLDBB ] && { log "STOP file"; break; }
-  drive $s full
+  case $s in mo) mini=$MO_MINI ;; dolt) mini=$DOLT_MINI ;; neon) mini=$NEON_MINI ;; esac
+  first=1
+  for spec in "mo|$MO_WORKFLOWS" "dolt_fair|$DOLT_WORKFLOWS" "dolt|$DOLT_ORIG_WORKFLOWS" "neon|$NEON_WORKFLOWS"; do
+    v=${spec%%|*}; wf=${spec#*|}
+    case $v in mo) [ $s = mo ] ;; dolt_fair|dolt) [ $s = dolt ] ;; neon) [ $s = neon ] ;; esac || continue
+    [ -n "$wf" ] || continue
+    [ -e mon/STOP_OLDBB ] && { log "STOP file"; break 2; }
+    if [ "$mini" = 1 ] && [ $first = 1 ]; then   # one mini pass per system, on its first variant
+      drive $v mini "$wf" || { log "$v: the mini pass did not complete every workflow (log $OUT/logs/${v}_mini.log), skipping $s"; continue 2; }
+    fi
+    first=0
+    [ -e mon/STOP_OLDBB ] && { log "STOP file"; break 2; }
+    drive $v full "$wf"
+  done
   case $s in
     mo)   docker logs --tail 50000 $MC 2>&1 | gzip > $OUT/logs/server_mo.log.gz ;;
     dolt) docker logs --tail 50000 $DC 2>&1 | gzip > $OUT/logs/server_dolt.log.gz ;;
