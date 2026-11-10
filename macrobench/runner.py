@@ -64,6 +64,7 @@ TxnToolSuite = _optional_suite(
     lambda: __import__("dblib.transaction", fromlist=["TxnToolSuite"]), "TxnToolSuite"
 )
 from dblib.matrixone import MoToolSuite, _connect as mo_connect
+from dblib.dolt_mysql import DoltMySQLToolSuite, _connect as dolt_mysql_connect
 
 
 def _create_db_tools(config, backend_info, result_collector):
@@ -130,6 +131,14 @@ def _create_db_tools(config, backend_info, result_collector):
             autocommit,
             backend_info.default_branch_name,
             backend_info.setup_branches if backend_info.setup_branches else [],
+        )
+    elif backend == tp.Backend.DOLT_MYSQL:
+        # Each worker gets its own pymysql connection; branches are Dolt branches.
+        return DoltMySQLToolSuite.init_for_bench(
+            result_collector,
+            db_name,
+            autocommit,
+            backend_info.default_branch_name,
         )
     elif backend == tp.Backend.MATRIXONE:
         # Each worker gets its own pymysql connection to the base database.
@@ -968,10 +977,15 @@ def main():
 
     def _on_deadline():
         stop_event.set()
-        if config.backend == tp.Backend.MATRIXONE:
+        if config.backend in (tp.Backend.MATRIXONE, tp.Backend.DOLT_MYSQL):
             try:
                 # PyMySQL has no cancel(); use a separate control connection.
-                with mo_connect(autocommit=True, timeout=5) as control:
+                ctl = (
+                    mo_connect
+                    if config.backend == tp.Backend.MATRIXONE
+                    else dolt_mysql_connect
+                )
+                with ctl(autocommit=True, timeout=5) as control:
                     for conn in list(worker_conns.values()):
                         if conn.open:
                             try:

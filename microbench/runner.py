@@ -58,6 +58,8 @@ def _optional(loader, *names):
     lambda: __import__("dblib.tiger", fromlist=["TigerToolSuite"]), "TigerToolSuite"
 )
 from dblib import matrixone as mo
+from dblib import dolt_mysql
+from dblib.dolt_mysql import DoltMySQLToolSuite
 from dblib.matrixone import MoToolSuite, create_database_and_load_schema
 
 
@@ -253,6 +255,17 @@ def create_backend_project(config: tp.TaskConfig, output_dir: str = "/tmp/run_st
         else:
             raise NotImplementedError("Xata requires database setup")
 
+    elif backend == tp.Backend.DOLT_MYSQL:
+        # MySQL Dolt: one database, Dolt branches inside it (the root branch is main);
+        # the SQL file is loaded and committed over pymysql (not psql).
+        info.default_uri = DoltMySQLToolSuite.get_default_connection_uri()
+        info.default_branch_name = "main"
+        info.default_branch_id = "main"
+        if require_db_setup:
+            dolt_mysql.load_and_commit(
+                db_name, config.database_setup.sql_dump.sql_dump_path
+            )
+
     elif backend == tp.Backend.MATRIXONE:
         # MatrixOne speaks MySQL; the "main" branch is the base physical
         # database. Schema/seed loading goes through the pymysql helper rather
@@ -280,7 +293,10 @@ def create_backend_project(config: tp.TaskConfig, output_dir: str = "/tmp/run_st
 
     # Create the benchmark database and load contents from a SQL dump file if required.
     # MatrixOne handles its own setup above (MySQL protocol, not psycopg2).
-    if require_db_setup and backend != tp.Backend.MATRIXONE:
+    if require_db_setup and backend not in (
+        tp.Backend.MATRIXONE,
+        tp.Backend.DOLT_MYSQL,
+    ):
         if not info.tiger:
             create_benchmark_database(info.default_uri, db_name)
         # Load the database contents from a SQL dump file into the benchmark
@@ -407,6 +423,9 @@ def cleanup_backend(
                 except Exception as e:
                     print(f"Warning: failed to delete Tiger service {sid}: {e}")
         TigerToolSuite.delete_tiger_service(project_id, root_id)
+    elif config.backend == tp.Backend.DOLT_MYSQL and db_name:
+        dolt_mysql.drop_database(db_name)
+        print(f"Dolt (MySQL) database '{db_name}' deleted successfully.")
     elif config.backend == tp.Backend.MATRIXONE and db_name:
         # Drop the base database and every clone database (db_name_br_*).
         try:

@@ -12,6 +12,7 @@ enum Backend {
     TIGER = 5;
     TXN = 6;
     MATRIXONE = 7;
+    DOLT_MYSQL = 8;  // MySQL Dolt (dolt sql-server), dblib/dolt_mysql.py (11-10)
 }
 
 // The five representative workflow categories from Section 3.1
